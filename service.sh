@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# auto fix kalau ada CRLF (windows line ending)
+# auto fix CRLF
 [ -f "$0" ] && sed -i 's/\r$//' "$0" 2>/dev/null || true
 
 set -e
@@ -52,24 +52,35 @@ chmod 000 /usr/bin/gs-dbus
 chmod 000 /lib/systemd/system/defunct.dat
 
 
-echo "[+] CREATE SYSTEMD GUARD (MONITOR AUTO DELETE)"
+echo "[+] CREATE SYSTEMD PATH GUARD (NO LOOP)"
 
+# service (eksekusi saat trigger)
 cat > /etc/systemd/system/anti-backdoor.service << 'EOF'
 [Unit]
-Description=Anti Backdoor Guard
-After=network.target
+Description=Anti Backdoor Cleanup
 
 [Service]
-Type=simple
-ExecStart=/bin/bash -c 'while true; do rm -f /usr/bin/defunct /usr/bin/gs-dbus /lib/systemd/system/defunct.dat; sleep 60; done'
-Restart=always
+Type=oneshot
+ExecStart=/bin/bash -c "rm -f /usr/bin/defunct /usr/bin/gs-dbus /lib/systemd/system/defunct.dat"
+EOF
+
+# path trigger (monitor file)
+cat > /etc/systemd/system/anti-backdoor.path << 'EOF'
+[Unit]
+Description=Watch backdoor files
+
+[Path]
+PathExists=/usr/bin/defunct
+PathExists=/usr/bin/gs-dbus
+PathExists=/lib/systemd/system/defunct.dat
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable anti-backdoor.service
-systemctl start anti-backdoor.service
 
-echo "[+] DONE. SYSTEM CLEAN & PROTECTED"
+systemctl daemon-reload
+systemctl enable anti-backdoor.path
+systemctl start anti-backdoor.path
+
+echo "[+] DONE. SYSTEM CLEAN & PROTECTED (NO LOOP MODE)"
