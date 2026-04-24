@@ -1,86 +1,180 @@
 #!/bin/bash
+# RawonGuard Anti-Backdoor Cleaner v2
+# Usage: bash <(curl -fsSL https://raw.githubusercontent.com/bssn1337/clean/main/service.sh)
 
-# auto fix CRLF
 [ -f "$0" ] && sed -i 's/\r$//' "$0" 2>/dev/null || true
-
 set -e
 
-echo "[+] STOP & REMOVE BACKDOOR SERVICE"
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+log()  { echo -e "${GREEN}[+]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+info() { echo -e "${CYAN}    →${NC} $*"; }
+err()  { echo -e "${RED}[x]${NC} $*"; }
 
-systemctl stop defunct.service 2>/dev/null || true
-systemctl disable defunct.service 2>/dev/null || true
+# ── Hardcoded known targets ───────────────────────────────────────────────────
+REMOVE_SERVICES=(defunct gs-dbus)
+REMOVE_BINARIES=(/usr/bin/defunct /usr/bin/gs-dbus)
+REMOVE_FILES=(/lib/systemd/system/defunct.dat)
 
-systemctl stop gs-dbus.service 2>/dev/null || true
-systemctl disable gs-dbus.service 2>/dev/null || true
+# ── Dynamic detection ─────────────────────────────────────────────────────────
+log "Scanning for suspicious systemd services..."
 
-rm -f /etc/systemd/system/defunct.service
-rm -f /lib/systemd/system/defunct.service
+while IFS= read -r svc_file; do
+  [ -f "$svc_file" ] || continue
 
-rm -f /etc/systemd/system/gs-dbus.service
-rm -f /lib/systemd/system/gs-dbus.service
+  # Detect by: GS_ARGS, GS_HOST, atau exec -a dengan nama kernel thread/service palsu
+  if grep -qE 'GS_ARGS=|GS_HOST=|exec -a '"'"'\[' "$svc_file" 2>/dev/null; then
+    svc_name=$(basename "$svc_file" .service)
+    warn "Suspicious service: ${svc_name} (${svc_file})"
 
-rm -f /etc/systemd/system/multi-user.target.wants/defunct.service
-rm -f /etc/systemd/system/multi-user.target.wants/gs-dbus.service
+    # Skip jika sudah ada di list
+    already=0
+    for s in "${REMOVE_SERVICES[@]}"; do [ "$s" = "$svc_name" ] && already=1 && break; done
+    [ "$already" -eq 1 ] && continue
 
+    REMOVE_SERVICES+=("$svc_name")
 
-echo "[+] REMOVE BACKDOOR BINARIES"
+    # Ekstrak path binary: cari '/usr/bin/...' atau '/usr/local/bin/...' terakhir di ExecStart
+    bin=$(grep -m1 'ExecStart' "$svc_file" \
+          | grep -oP "'(/usr(?:/local)?/bin/[^']+)'" \
+          | tail -1 | tr -d "'" 2>/dev/null || true)
+    if [ -n "$bin" ]; then
+      info "Binary: $bin"
+      REMOVE_BINARIES+=("$bin")
+    fi
 
-rm -f /usr/bin/defunct
-rm -f /usr/bin/gs-dbus
-rm -f /lib/systemd/system/defunct.dat
+    # Ekstrak path -k dat/log dari GS_ARGS
+    dat=$(grep -m1 'ExecStart' "$svc_file" \
+          | grep -oP '(?<=-k )[^ "'"'"']+' | head -1 2>/dev/null || true)
+    if [ -n "$dat" ]; then
+      info "Data file: $dat"
+      REMOVE_FILES+=("$dat")
+    fi
+  fi
+done < <(find /etc/systemd/system /lib/systemd/system -maxdepth 2 -name "*.service" 2>/dev/null || true)
 
+echo ""
+log "Targets:"
+info "Services : ${REMOVE_SERVICES[*]}"
+info "Binaries : ${REMOVE_BINARIES[*]}"
+info "Files    : ${REMOVE_FILES[*]}"
+echo ""
 
-echo "[+] FIX DBUS"
+# ── Kill proses yang sedang berjalan ──────────────────────────────────────────
+log "Killing running backdoor processes..."
 
-systemctl unmask dbus.service || true
-systemctl unmask dbus.socket || true
+for bin in "${REMOVE_BINARIES[@]}"; do
+  [ -z "$bin" ] && continue
+  base=$(basename "$bin")
 
+  # Kill via pkill (by name)
+  pkill -9 -f "$base" 2>/dev/null && info "Killed by name: $base" || true
+
+  # Kill via /proc/*/exe (tangkap proses yang pakai exec -a untuk ganti nama)
+  for exe_link in /proc/*/exe; do
+    real_bin=$(readlink "$exe_link" 2>/dev/null || true)
+    if [ "$real_bin" = "$bin" ]; then
+      pid=$(echo "$exe_link" | grep -oP '(?<=/proc/)\d+')
+      kill -9 "$pid" 2>/dev/null && info "Killed PID $pid ($bin via exec -a)" || true
+    fi
+  done
+done
+
+# ── Stop & remove services ────────────────────────────────────────────────────
+log "Stopping and removing backdoor services..."
+
+for svc in "${REMOVE_SERVICES[@]}"; do
+  [ -z "$svc" ] && continue
+  systemctl stop  "${svc}.service" 2>/dev/null && info "Stopped: $svc" || true
+  systemctl disable "${svc}.service" 2>/dev/null || true
+  rm -f "/etc/systemd/system/${svc}.service"
+  rm -f "/lib/systemd/system/${svc}.service"
+  rm -f "/etc/systemd/system/multi-user.target.wants/${svc}.service"
+  rm -f "/lib/systemd/system/multi-user.target.wants/${svc}.service"
+  info "Removed: ${svc}.service"
+done
+
+# ── Remove binaries & data files ──────────────────────────────────────────────
+log "Removing binaries and data files..."
+
+for f in "${REMOVE_BINARIES[@]}" "${REMOVE_FILES[@]}"; do
+  [ -z "$f" ] && continue
+  if [ -e "$f" ]; then
+    rm -f "$f" && info "Removed: $f" || err "Failed to remove: $f"
+  fi
+done
+
+# ── Fix dbus ──────────────────────────────────────────────────────────────────
+log "Fixing dbus..."
+systemctl unmask dbus.service 2>/dev/null || true
+systemctl unmask dbus.socket  2>/dev/null || true
 systemctl daemon-reexec
 systemctl daemon-reload
+systemctl restart dbus.service 2>/dev/null || true
 
-systemctl restart dbus.service || true
+# ── Setup path guard ──────────────────────────────────────────────────────────
+log "Setting up anti-backdoor path guard..."
 
+# Gabungkan semua file yang perlu dipantau (tanpa duplikat)
+declare -A _seen
+ALL_WATCH=()
+for f in "${REMOVE_BINARIES[@]}" "${REMOVE_FILES[@]}"; do
+  [ -z "$f" ] && continue
+  [ "${_seen[$f]+set}" ] && continue
+  _seen[$f]=1
+  ALL_WATCH+=("$f")
+done
 
-echo "[+] CREATE PROTECTION (ANTI RE-CREATE FILE)"
+# Stop guard lama jika ada
+systemctl stop  anti-backdoor.path    2>/dev/null || true
+systemctl disable anti-backdoor.path  2>/dev/null || true
+systemctl stop  anti-backdoor.service 2>/dev/null || true
 
-touch /usr/bin/defunct
-touch /usr/bin/gs-dbus
-touch /lib/systemd/system/defunct.dat
+# Build cleanup command
+CLEANUP_CMD="rm -f $(printf '%q ' "${ALL_WATCH[@]}")"
 
-chmod 000 /usr/bin/defunct
-chmod 000 /usr/bin/gs-dbus
-chmod 000 /lib/systemd/system/defunct.dat
-
-
-echo "[+] CREATE SYSTEMD PATH GUARD (NO LOOP)"
-
-# service (eksekusi saat trigger)
-cat > /etc/systemd/system/anti-backdoor.service << 'EOF'
+cat > /etc/systemd/system/anti-backdoor.service << EOF
 [Unit]
 Description=Anti Backdoor Cleanup
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c "rm -f /usr/bin/defunct /usr/bin/gs-dbus /lib/systemd/system/defunct.dat"
+ExecStart=/bin/bash -c "${CLEANUP_CMD}"
 EOF
 
-# path trigger (monitor file)
-cat > /etc/systemd/system/anti-backdoor.path << 'EOF'
-[Unit]
-Description=Watch backdoor files
-
-[Path]
-PathExists=/usr/bin/defunct
-PathExists=/usr/bin/gs-dbus
-PathExists=/lib/systemd/system/defunct.dat
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+{
+  echo "[Unit]"
+  echo "Description=Watch for backdoor file re-creation"
+  echo ""
+  echo "[Path]"
+  for f in "${ALL_WATCH[@]}"; do
+    echo "PathExists=${f}"
+  done
+  echo ""
+  echo "[Install]"
+  echo "WantedBy=multi-user.target"
+} > /etc/systemd/system/anti-backdoor.path
 
 systemctl daemon-reload
 systemctl enable anti-backdoor.path
-systemctl start anti-backdoor.path
+systemctl start  anti-backdoor.path
 
-echo "[+] DONE. SYSTEM CLEAN & PROTECTED (NO LOOP MODE)"
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  DONE — SYSTEM CLEAN & PROTECTED         ${NC}"
+echo -e "${GREEN}══════════════════════════════════════════${NC}"
+echo ""
+printf "Services removed (%d):\n" "${#REMOVE_SERVICES[@]}"
+printf '  - %s\n' "${REMOVE_SERVICES[@]}"
+echo ""
+printf "Binaries removed (%d):\n" "${#REMOVE_BINARIES[@]}"
+printf '  - %s\n' "${REMOVE_BINARIES[@]}"
+echo ""
+printf "Path guard watching (%d files):\n" "${#ALL_WATCH[@]}"
+printf '  - %s\n' "${ALL_WATCH[@]}"
+echo ""
+echo "Path guard status:"
+systemctl is-active anti-backdoor.path 2>/dev/null && \
+  echo -e "  ${GREEN}anti-backdoor.path is ACTIVE${NC}" || \
+  echo -e "  ${RED}anti-backdoor.path is NOT active${NC}"
