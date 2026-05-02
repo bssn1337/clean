@@ -61,6 +61,10 @@ while IFS= read -r home_dir; do
               -not -path "*/.npm/*" \
               -not -path "*/.composer/*" \
               -not -path "*/.cache/*" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.nvm/*" \
+              -not -path "*/.rbenv/*" \
+              -not -path "*/.pyenv/*" \
               2>/dev/null | grep -vE '\.(py|php|rb|pl|sh|txt|log|jpg|png|css|js|html|gz|zip|tar|so|a|o)$' || true)
 done < <(awk -F: '$3 >= 500 && $3 < 65534 {print $6}' /etc/passwd 2>/dev/null | sort -u)
 
