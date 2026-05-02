@@ -57,7 +57,11 @@ while IFS= read -r home_dir; do
         fi
     done < <(find "$home_dir" -maxdepth 5 -type f \
               \( -path "*/.config/*" -o -path "*/.local/*" -o -path "*/.[a-z]*/*" \) \
-              2>/dev/null | grep -vE '\.(py|php|rb|pl|sh|txt|log|jpg|png|css|js|html)$' || true)
+              -not -path "*/.git/*" \
+              -not -path "*/.npm/*" \
+              -not -path "*/.composer/*" \
+              -not -path "*/.cache/*" \
+              2>/dev/null | grep -vE '\.(py|php|rb|pl|sh|txt|log|jpg|png|css|js|html|gz|zip|tar|so|a|o)$' || true)
 done < <(awk -F: '$3 >= 500 && $3 < 65534 {print $6}' /etc/passwd 2>/dev/null | sort -u)
 
 # ── Print targets ─────────────────────────────────────────────────────────────
