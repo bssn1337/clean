@@ -205,7 +205,7 @@ is_php_whitelisted() {
     [[ "$file" == */autoload_real.php ]]           && return 0  # Composer autoload
     [[ "$file" == */autoload_static.php ]]         && return 0  # Composer autoload
     # ionCube / Zend Guard encoded files (legitimate obfuscation)
-    head -c 100 "$file" 2>/dev/null | grep -qE 'ionCube|Zend Guard|Zend Loader' && return 0
+    timeout 1 head -c 100 "$file" 2>/dev/null | grep -qE 'ionCube|Zend Guard|Zend Loader' && return 0
     return 1
 }
 
@@ -325,26 +325,45 @@ scan_php_backdoors() {
         -not -path "*/var/cache/*"
         -not -path "*/wp-includes/*"
         -not -path "*/wp-admin/*"
+        -size -2M
     )
 
-    for entry in "${WEB_ROOTS[@]}"; do
-        local domain="${entry%%:*}"
-        local root="${entry#*:}"
-        [ -d "$root" ] || continue
+    # Pre-filter pattern: minimal string yang bisa jadi backdoor — 1x pass per dir
+    local PREFILTER='eval|assert|base64_decode|gzinflate|gzuncompress|str_rot13|gzdecode|shell_exec|passthru|proc_open|popen|create_function|preg_replace|FilesMan|c99shell|r57shell|WSO Shell|b374k|AntiSec|IndoXploit|alfa-team'
+
+    _scan_dir_php() {
+        local domain="$1" root="$2"
+        [ -d "$root" ] || return
 
         detect_cms "$root"
-        log "Scanning PHP: $domain ($root) [$CMS]"
+        local total_files
+        total_files=$(find "$root" -type f \( -name "*.php" -o -name "*.php7" -o -name "*.phtml" \) \
+                      "${find_excludes[@]}" 2>/dev/null | wc -l)
+        log "Scanning PHP: $domain ($root) [$CMS] — ${total_files} files"
 
-        # Scan PHP files
+        # Pass 1: grep -lP untuk pre-filter kandidat saja (jauh lebih cepat)
+        local candidates
+        candidates=$(find "$root" -type f \( -name "*.php" -o -name "*.php7" -o -name "*.phtml" \) \
+                      "${find_excludes[@]}" 2>/dev/null \
+                      -exec grep -lP "$PREFILTER" {} + 2>/dev/null)
+
+        local cnt=0
         while IFS= read -r f; do
+            [ -f "$f" ] || continue
             scan_php_file "$f" "$domain" "$root"
-        done < <(find "$root" -type f \( -name "*.php" -o -name "*.php7" -o -name "*.phtml" \) \
-                  "${find_excludes[@]}" 2>/dev/null)
+            ((cnt++))
+        done <<< "$candidates"
 
-        # Scan .htaccess files
+        [ "$MODE_VERBOSE" -eq 1 ] && info "$domain: $cnt candidate files analyzed (of $total_files total)"
+
+        # Scan .htaccess
         while IFS= read -r f; do
             scan_htaccess "$f" "$domain"
         done < <(find "$root" -name ".htaccess" 2>/dev/null)
+    }
+
+    for entry in "${WEB_ROOTS[@]}"; do
+        _scan_dir_php "${entry%%:*}" "${entry#*:}"
     done
 
     # Extra dirs: /tmp, /var/tmp, /dev/shm
@@ -352,7 +371,8 @@ scan_php_backdoors() {
         log "Scanning temp dir: $extra"
         while IFS= read -r f; do
             scan_php_file "$f" "SYSTEM-TEMP" "$extra"
-        done < <(find "$extra" -maxdepth 3 -type f -name "*.php" 2>/dev/null)
+        done < <(find "$extra" -maxdepth 3 -type f -name "*.php" -size -2M 2>/dev/null \
+                  -exec grep -lP "$PREFILTER" {} + 2>/dev/null)
     done
 }
 
