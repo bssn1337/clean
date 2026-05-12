@@ -1,5 +1,5 @@
 #!/bin/bash
-# RawonGuard Anti-Backdoor Cleaner v3
+# RawonGuard Anti-Backdoor Cleaner v4
 # Covers: systemd services, user home dirs, crontabs, rc.local, deleted-binary procs
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/bssn1337/clean/main/service.sh)
 
@@ -47,7 +47,8 @@ while IFS= read -r home_dir; do
     username=$(basename "$home_dir")
     while IFS= read -r suspicious_file; do
         [ -f "$suspicious_file" ] || continue
-        if file "$suspicious_file" 2>/dev/null | grep -qE 'ELF|executable'; then
+        # Only match actual ELF binaries — PHP/shell scripts are "executable" too but not malware
+        if file "$suspicious_file" 2>/dev/null | grep -q 'ELF'; then
             warn "Suspicious binary: $suspicious_file (user: $username)"
             REMOVE_BINARIES+=("$suspicious_file")
             dat_dir=$(dirname "$suspicious_file")
@@ -65,8 +66,11 @@ while IFS= read -r home_dir; do
               -not -path "*/.nvm/*" \
               -not -path "*/.rbenv/*" \
               -not -path "*/.pyenv/*" \
+              -not -path "*/.trash/*" \
+              -not -path "*/vendor/*" \
+              -not -path "*/debug/*" \
               2>/dev/null | grep -vE '\.(py|php|rb|pl|sh|txt|log|jpg|png|css|js|html|gz|zip|tar|so|a|o)$' || true)
-done < <(awk -F: '$3 >= 500 && $3 < 65534 {print $6}' /etc/passwd 2>/dev/null | sort -u)
+done < <(awk -F: '$3 >= 500 && $3 < 65534 {print $6}' /etc/passwd 2>/dev/null | grep -v '^/$' | sort -u)
 
 # ── Print targets ─────────────────────────────────────────────────────────────
 echo ""
@@ -82,7 +86,12 @@ log "Killing backdoor processes..."
 for bin in "${REMOVE_BINARIES[@]}"; do
     [ -z "$bin" ] && continue
     base=$(basename "$bin")
-    pkill -9 -f "$base" 2>/dev/null && info "Killed by name: $base" || true
+    # pkill by name ONLY for known malware — avoid killing legitimate processes like artisan/spark
+    case "$base" in
+        defunct|gs-dbus|gs-netcat|libglib-2.0.so.0)
+            pkill -9 -f "$base" 2>/dev/null && info "Killed by name: $base" || true
+            ;;
+    esac
     for exe_link in /proc/*/exe; do
         real_bin=$(readlink "$exe_link" 2>/dev/null | sed 's/ (deleted)$//' || true)
         if [ "$real_bin" = "$bin" ]; then
